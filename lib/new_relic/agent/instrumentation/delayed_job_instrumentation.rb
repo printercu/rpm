@@ -8,7 +8,7 @@ module NewRelic
   module Agent
     module Instrumentation
       module DelayedJob
-        module Naming
+        module LagacyPerformableMethodNaming
           module_function
 
           CLASS_METHOD_DELIMITER     = '.'.freeze
@@ -18,14 +18,9 @@ module NewRelic
           LEGACY_DJ_DEFAULT_CLASS    = '(unknown class)'.freeze
 
           def name_from_payload(payload_object)
-            if payload_object.is_a? ::Delayed::PerformableMethod
-              # payload_object contains a reference to an object
-              # that received an asynchronous method call via .delay or .handle_asynchronously
-              "#{object_name(payload_object)}#{delimiter(payload_object)}#{method_name(payload_object)}"
-            else
-              # payload_object is a user-defined job enqueued via Delayed::Job.enqueue
-              payload_object.class.name
-            end
+            # payload_object contains a reference to an object
+            # that received an asynchronous method call via .delay or .handle_asynchronously
+            "#{object_name(payload_object)}#{delimiter(payload_object)}#{method_name(payload_object)}"
           end
 
           # Older versions of Delayed Job use a semicolon-delimited string to stash the class name.
@@ -118,17 +113,39 @@ DependencyDetection.defer do
     Delayed::Job.class_eval do
       include NewRelic::Agent::Instrumentation::ControllerInstrumentation
 
+      def self.default_newrelic_trace_args(payload_object)
+        {
+          :category => Delayed::NR_TRANSACTION_CATEGORY,
+          :path => payload_object.class.name
+        }
+      end
+
       alias_method :invoke_job_without_new_relic, :invoke_job
 
       def invoke_job(*args, &block)
-        options = {
-          :category => Delayed::NR_TRANSACTION_CATEGORY,
-          :path => ::NewRelic::Agent::Instrumentation::DelayedJob::Naming.name_from_payload(payload_object)
-        }
+        trace_args = if payload_object.respond_to?(:newrelic_trace_args)
+          payload_object.newrelic_trace_args
+        else
+          self.class.default_newrelic_trace_args(msg)
+        end
 
         perform_action_with_newrelic_trace(options) do
           invoke_job_without_new_relic(*args, &block)
         end
+      end
+    end
+
+    Delayed::PerformableMethod.class_eval do
+      def newrelic_trace_args
+        path = if NewRelic::Agent.config[:'delayed_job.use_display_name']
+          payload_object.display_name
+        else
+          ::NewRelic::Agent::Instrumentation::DelayedJob::LagacyPerformableMethodNaming.name_from_payload(payload_object)
+        end
+        {
+          :category => Delayed::NR_TRANSACTION_CATEGORY,
+          :path => path
+        }
       end
     end
 
